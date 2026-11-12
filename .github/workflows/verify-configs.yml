@@ -1,0 +1,25 @@
+name: verify-configs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Replays every exported level config through the bundled simulator
+      # (test/js) and fails if any reachability goal is KO.
+      - name: Verify NetPractice configs
+        run: node .github/scripts/verify-configs.js --seed "$NETPRACTICE_SEED"
+        env:
+          # hash_login() value of the login the configs were produced with
+          NETPRACTICE_SEED: "442685"
