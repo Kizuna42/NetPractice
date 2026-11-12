@@ -1,0 +1,203 @@
+# 🌐 NetPractice — IP アドレッシングとルーティングの設計課題
+
+![school](https://img.shields.io/badge/42-Tokyo-000000.svg)
+![project](https://img.shields.io/badge/project-NetPractice-1f6feb.svg)
+![rank](https://img.shields.io/badge/rank-04-blue.svg)
+![verify-configs](https://github.com/Kizuna42/NetPractice/actions/workflows/verify-configs.yml/badge.svg)
+![goals](https://img.shields.io/badge/goals-31%2F31-brightgreen.svg)
+![artifact](https://img.shields.io/badge/artifact-JSON%20config-lightgrey.svg)
+
+> **TL;DR (EN):** A [42](https://42tokyo.jp/) project with **no code to write**. Each of the
+> 10 levels presents a broken TCP/IP topology in a browser simulator; the task is to assign
+> IP addresses, subnet masks and routing-table entries until every reachability goal turns
+> green. The deliverable is the 10 exported configurations — **10 JSON files, 3,242 bytes
+> total** — so the *address design itself* is the artifact, not lines of source. All 10
+> levels (**31 goals**) are re-verified in CI by replaying the saved configs through 42's own
+> simulator under Node (`node .github/scripts/verify-configs.js --seed 442685`).
+
+本リポジトリは 42 の課題 **NetPractice** の提出物です。この課題はコードを書きません。
+壊れたネットワーク構成がブラウザ上のシミュレータで与えられ、IP アドレス・サブネットマスク・
+ルーティングテーブルを設計して全ての到達性ゴールを成立させるのが課題の内容です。
+したがって C ソースも Makefile も存在せず、成果物は 10 レベル分の設定を書き出した
+JSON 10 ファイル・計 3,242 バイトだけです。記録されているのは自分が編集した欄だけで、
+編集不可の固定値は含まれません。ゴール数は合計 31（L1:2 / L2:2 / L3:3 / L4:3 / L5:3 /
+L6:1 / L7:1 / L8:3 / L9:6 / L10:7）です。
+
+---
+
+## レベル別の設計要点
+
+| Lv | ゴール | 与えられた制約 | 設計した内容 |
+| --- | --- | --- | --- |
+| 1 | 2 | 直結 2 組（A-B / C-D）、ルータなし | 範囲外オクテットの IP を隣接ホストと同一サブネットに訂正 |
+| 2 | 2 | B1 のマスクのみ編集可、C-D は `/30` 固定 | A-B を `/27` に、C-D を `192.168.0.0/30` に統一 |
+| 3 | 3 | スイッチ配下に A・B・C の 3 ホスト | 3 者すべてを `104.198.142.0/25` に収容 |
+| 4 | 3 | スイッチ配下に A・B・R1、R1 は R2・R3 も持つ | R1 側を `/25` にして A・B・R1 を `80.68.118.128/25` に |
+| 5 | 3 | ルータ 1 台の 2 面にホストが分かれる | 各面のサブネットにホストを再配置し、両ホストに default route |
+| 6 | 1 | Internet 到達がゴール | `/25` へ分割し、Internet 側の戻り経路と R の default route を設定 |
+| 7 | 1 | `R11=.1` / `R12=.254` の 2 アドレスが編集不可 | `95.198.14.0/24` を重ならない 3 つの `/28` に分割 |
+| 8 | 3 | ISP 側の戻り経路 `155.85.150.0/26` が編集不可 | 全サブネットをその内側に収め、R1 側は集約経路 1 本に |
+| 9 | 6 | ルータ 2 台 + スイッチ + Internet | private を public へ振り直し、不要な経路行を無効化 |
+| 10 | 7 | Internet の戻り経路が `/31` で配布 | `/24` へ広げて 3 サブネットを 1 本に集約 |
+
+Level 1〜5 では、配布時の値そのものが意図的に不正になっています。`104.93.23.310` や
+`104.198.142.282` のようにオクテットが 255 を超えるもの、`255.255.255.32` のようにマスクの 1 が
+連続しないもの、`127.0.0.1` / `127.168.42.42` のようなループバック、`10..0.0.0/8` のように
+4 オクテットへ分割できないものがあり、`ip_to_int` / `mask_to_int` がこれらを `null` で弾きます
+（`ip_to_int` は第 1 オクテットが 223 を超えるクラス D/E も拒否し、`127/8` は明示的に除外）。
+まず妥当な値に直すところから始まる構成です。
+
+---
+
+## 設計の勘所
+
+### Level 7 — 固定された 2 点から逆算するサブネット分割
+
+`R11 = 95.198.14.1` と `R12 = 95.198.14.254` が編集不可で、しかも同じ `/24` の中にあります。
+この 2 点は別々のサブネットに属さなければならないため、`95.198.14.0/24` を重ならない `/28` に
+切り分けました。
+
+- A ― R1 : `95.198.14.0/28`（`R11=.1` 固定 / `A1=.2`）
+- R1 ― R2 : `95.198.14.240/28`（`R12=.254` 固定 / `R21=.253`）
+- R2 ― C : `95.198.14.64/28`（`R22=.65` / `C1=.66`）
+
+4 ノードすべてに default route を 1 本ずつ置くのが最小構成になります。
+
+### Level 8 / 10 — 外部の固定経路が内部設計の範囲を縛り、集約が効く
+
+Internet 側の戻り経路 `Ir1 = 155.85.150.0/26` が編集不可でした。これが最上位の制約で、
+自分が触れる全サブネットを `155.85.150.0`〜`.63` の内側に収める必要があります。
+
+- R2 ― D : `155.85.150.0/28`（`R23=.1` / `D1=.2`）
+- R2 ― C : `155.85.150.16/28`（`R22=.17` / `C1=.18`）
+- R1 ― R2 : `155.85.150.60/30`（`R21=.61` / `R13=.62`）
+
+R1 側は C 用・D 用の経路を個別に書かず、`R1r2` に `155.85.150.0/26 → 155.85.150.61` の
+1 本だけを置いて集約しました。Level 10 でも同じ手を使っており、Internet の戻り経路 `Ir1` を
+配布時の `143.160.105.0/31` から `/24` へ広げ、H1/H2（`.0/25`）・H4（`.128/26`）・
+H3（`.224/28`）の 3 サブネットを 1 本でカバーしています。なお `R1r1` は
+`143.160.105.227/28` という「ホストアドレス + プレフィクス長」の形ですが、`sim.js` は照合時に
+`rip & rmask` を取るため `143.160.105.224/28` と等価に動作します。
+
+### Level 8 / 9 / 10 — private アドレスは Internet を越えない
+
+`test/js/sim.js` の `private_subnets` は `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` を
+internet ノードで明示的に破棄します。Internet 到達がゴールに含まれるホストは、private のままでは
+どう経路を書いても通りません。実際に振り直したのは次の箇所です。
+
+| Lv | 配布時 | 変更後 |
+| --- | --- | --- |
+| 8 | `C1 = 192.168.0.1` | `155.85.150.18` |
+| 9 | `C1 = 10.0.0.1` / `R22 = 10.0.0.254` | `42.42.42.2` / `42.42.42.1` |
+| 10 | `H31 = 192.168.0.1` / `R22 = 10.0.0.254` | `143.160.105.227` / `143.160.105.226` |
+
+NAT が現実のネットワークで必要になる理由が、そのまま制約として現れる形になっています。
+
+### Level 9 — 経路表は「最長一致」ではなく「最初の一致」
+
+`sim.js` の経路探索は経路表を上から線形に走査し、一致した時点で打ち切ります
+（`rec_route` 内で `nb_routes > 0` になったら `return`）。最長一致ではないため、
+default route を置く位置が意味を持ちます。
+
+- `R1r1` を default にして R2 方向へ集約した。R1 の直結サブネットは経路表を見る前に
+  インターフェース照合で解決されるため、default が先頭にあっても Internet 到達は壊れない
+- 不要な行は削除できないので `route` 欄を空文字にして無効化した（`R1r2`・`Ir3`）。
+  空文字は `ip_match_route` で一致にならず、そのまま次の行へ流れる
+- Internet 側は A/B 用の `/25` と C 用の `/24` の 2 本だけを残した。ゴールに含まれない
+  D への戻り経路は意図的に持たせていない
+
+---
+
+## ビルド・実行方法
+
+**ビルドはありません。** Makefile もコンパイル対象のソースも存在しません。リポジトリ内の
+JavaScript は、42 配布のシミュレータ（`test/`）と、提出物を検証するための CI 用スクリプト
+（`.github/`）だけです。
+
+本来の解き方は、42 が配布するシミュレータ（`test/` 配下。詳細は末尾の注記を参照）をブラウザで
+開き、login を入力して各レベルの IP・マスク・経路を編集し、"Check again" で判定、
+"Get my config" で書き出す、という手順です。ここにある 10 個の JSON はその書き出し結果です。
+
+---
+
+## 検証
+
+保存済みの 10 個の JSON は、42 配布のシミュレータ本体（`test/js/show.js` + `test/js/sim.js` +
+`test/js/levelN.js`）をブラウザなしで動かす検証スクリプト
+[`.github/scripts/verify-configs.js`](.github/scripts/verify-configs.js) で再判定しています。
+スクリプトは最小限の DOM を用意して Node の `vm` 上でシミュレータをそのまま実行し、各 JSON の値を
+入力欄へ流し込んでから全ゴールを `sim_goal` で判定します。あわせて次の点も検査します。
+
+- 編集可能な欄が JSON に欠けていないか
+- 編集不可の欄や、存在しないインターフェース・経路が JSON に含まれていないか
+- 同じレベルの設定ファイルが重複していないか（ファイル名は `Level 4 Data.json` / `level6.json`
+  のような表記揺れを許容して `level\s*N( data)?.json` で照合）
+
+### CI
+
+[`.github/workflows/verify-configs.yml`](.github/workflows/verify-configs.yml) が `main` への push と
+全 pull request でこのスクリプトを実行し、1 つでも KO のゴールや上記の問題があれば失敗します
+（Node 22、追加の依存パッケージなし）。
+
+### ローカルでの実行
+
+Node.js（CI と同じ 22 を推奨）があれば、リポジトリのルートで次を実行するだけです。
+
+```sh
+node .github/scripts/verify-configs.js --seed 442685
+```
+
+```
+PASS level 1 (Level 1.json)
+PASS level 2 (Level 2.json)
+PASS level 3 (Level 3.json)
+PASS level 4 (Level 4 Data.json)
+PASS level 5 (Level 5 Data.json)
+PASS level 6 (level6.json)
+PASS level 7 (Level 7 Data.json)
+PASS level 8 (Level 8.json)
+PASS level 9 (Level 9.json)
+PASS level 10 (level10.json)
+```
+
+失敗したレベルは `FAIL` と表示され、KO になったゴールと検出した問題が続けて出力されます。
+終了コードは全レベル成功なら 0、それ以外は非 0 です。
+
+| オプション | 内容 |
+| --- | --- |
+| `--seed <N>` | `hash_login()` の値 N を乱数の種として全レベルを判定（CI はこれを使用） |
+| `--login <login>` | login 文字列から `hash_login()` で種を計算して判定 |
+| `--search <max>` | 種 0〜max を総当たりし、全レベルが通る種を列挙 |
+
+出題トポロジの一部のアドレスは login のハッシュから決定論的に生成されます（`show.js` の
+`hash_login` と xorshift ベースの `my_random`）。そのため書き出した設定は、作成時の login でしか
+通りません。CI では login そのものではなくハッシュ値 `442685` を `NETPRACTICE_SEED` として渡しています。
+この値は `--search` による総当たりで特定したもので、種がずれていれば保存済みの設定は通らないため、
+全 10 レベル・計 31 ゴールが OK になること自体が再現の裏付けになっています。
+
+---
+
+## 学んだこと
+
+- **サブネット判定はビット演算に還元される。** 「同じネットワークか」は `(ip & mask)` が
+  一致するかどうかだけで決まる。点区切り表記は本質ではない
+- **マスクの妥当性は「上位ビットの 1 が連続していること」。** `(~mask + 1) & (~mask) == 0` で
+  判定できる。2 の冪判定と同じ手法である
+- **経路表の照合順序は自明ではない。** 実機の longest prefix match と違い、このシミュレータは
+  最初に一致した 1 本しか使わない。さらに直結サブネットは経路表を見る前にインターフェース
+  照合で解決される。この 2 点を理解すると、default の置き場所が変わり、書かなくてよい経路が
+  見えてくる
+- **RFC1918 の private アドレスは Internet を越えない。** NAT が必要な理由が、
+  「private のままだと到達ゴールが絶対に成立しない」という形で体験できた
+- **往路と復路は独立に考える必要がある。** `sim_reach_gen` は往路の探索が成功した後に
+  復路を別途探索し、どちらか一方でも届かなければ `KO - No forward way` /
+  `KO - No reverse way` になる。戻り経路を忘れやすいことを繰り返し確認させられた
+
+---
+
+## `test/` について
+
+`test/` 配下は 42 が配布した教材（HTML / CSS / JavaScript / 画像）であり、**本人の実装物ではありません。**
+同梱の `test/License` は、この内容が 42 のカリキュラムの一部として教育目的で提供されたものであり、
+複製・改変・カリキュラム外での利用が許可されていない旨を明記しています。提出物として一式が
+含まれているため、ここでは参照対象として扱うにとどめています。
